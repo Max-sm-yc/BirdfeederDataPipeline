@@ -3,7 +3,7 @@ import argparse
 from square import Square
 from square.environment import SquareEnvironment
 from dotenv import load_dotenv
-from datetime import datetime, timedelta, timezone 
+from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client as SupabaseClient
 
 load_dotenv()
@@ -23,13 +23,31 @@ def main():
     else:
         # Default to yesterday
         selected_date = datetime.now(timezone.utc) - timedelta(days=1)
-    
+
     user_date_str = selected_date.strftime("%Y-%m-%d")
     start_of_day = selected_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
     start_of_next_day = start_of_day + timedelta(days=1)
-    
+
     start_at_iso = start_of_day.isoformat().replace('+00:00', 'Z')
     end_at_iso = start_of_next_day.isoformat().replace('+00:00', 'Z')
+
+    # --- Connect to Supabase & Load COGS ---
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SECRET_KEY")
+
+    supabase: SupabaseClient = None
+    COGS_MAPPING = {}
+
+    if supabase_url and supabase_key:
+        supabase = create_client(supabase_url, supabase_key)
+        try:
+            products_result = supabase.table("products").select("name, cogs").execute()
+            COGS_MAPPING = {p["name"]: float(p["cogs"]) for p in products_result.data}
+            print(f"Loaded {len(COGS_MAPPING)} products from Supabase.")
+        except Exception as e:
+            print(f"Warning: Could not load products from Supabase: {e}. COGS will be $0.")
+    else:
+        print("Warning: Supabase credentials missing. COGS will be $0.")
 
     client = Square(
         token=os.getenv("SQUARE_ACCESS_TOKEN"),
@@ -45,8 +63,8 @@ def main():
             "filter": {
                 "date_time_filter": {
                     "created_at": {
-                        "start_at": start_at_iso, 
-                        "end_at": end_at_iso     
+                        "start_at": start_at_iso,
+                        "end_at": end_at_iso
                     }
                 }
             }
@@ -60,31 +78,6 @@ def main():
         location_id=location_id
     )
 
-    # --- Financial Mappings ---
-    COGS_MAPPING = {
-        "Airheads Xtremes": 0.93,
-        "Arnold Palmer": 0.53,
-        "Coke": 0.50,
-        "Diet Coke": 0.50,
-        "Dr. Pepper": 0.48,
-        "Flamin Hot Cheetos": 0.38,
-        "KitKat": 1.16,
-        "Lays Variety": 0.62,
-        "Made Good Bars": 0.62,
-        "Nerd Gummy Clusters": 1.54,
-        "Oreos": 0.92,
-        "Oreo": 0.92,
-        "Sourpatch Kids": 0.90,
-        "Sprite": 0.50,
-        "Sunchips Variety": 0.62,
-        "Popcorners": 0.50,
-        "Pumpkin Frappuccino": 1.47,
-        "Frappuccino Vanilla": 1.47,
-        "Frappuccino Mocha": 1.47,
-        "Juice": 0.58,
-        "Crush for your crush" : 1.86,
-    }
-
     # --- 3. List Payments (for Processing Fees) ---
     payment_result = client.payments.list(
         begin_time=start_at_iso,
@@ -96,7 +89,7 @@ def main():
     total_cogs = 0.0
     total_refunded = 0.0
     total_discounts = 0.0
-    total_fees = 0.0 
+    total_fees = 0.0
 
     # --- Process Orders (Gross, Discounts, COGS) ---
     if order_result.orders:
@@ -109,7 +102,7 @@ def main():
             if order.total_money:
                 net_paid = float(order.total_money.amount or 0) / 100.0
                 gross_revenue += (net_paid + order_discount)
-            
+
             if order.line_items:
                 for item in order.line_items:
                     name = item.name
@@ -131,7 +124,7 @@ def main():
     # --- Final Summary Calculations ---
     # Net Revenue = Gross - Discounts - Refunds
     net_revenue = gross_revenue - total_refunded
-    gross_profit = net_revenue - total_cogs 
+    gross_profit = net_revenue - total_cogs
     net_income = gross_profit - total_discounts - total_fees
 
     print(f"\n{'='*40}")
@@ -151,14 +144,9 @@ def main():
     print(f"{'='*40}")
 
     # --- Upload to Supabase ---
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SECRET_KEY")
-
-    if not supabase_url or not supabase_key:
+    if not supabase:
         print("Supabase credentials missing. Skipping upload.")
         return
-
-    supabase: SupabaseClient = create_client(supabase_url, supabase_key)
 
     data = {
         "date": user_date_str,
